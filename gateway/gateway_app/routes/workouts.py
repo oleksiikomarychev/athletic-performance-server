@@ -5,7 +5,6 @@ import re
 from datetime import datetime, timedelta
 
 import common_pb2 as common_pb2
-import grpc
 import httpx
 import workouts_pb2 as workouts_pb2
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, UploadFile, status
@@ -163,10 +162,10 @@ async def _get_actual_workout_sets(workout_id: int, headers: dict) -> dict[str, 
                     status_code=response.status_code,
                 )
                 return {}
-            
+
             workout_data = response.json()
             exercises = workout_data.get("exercises", [])
-            
+
             # Organize sets by exercise_list_id (exercise definition ID from exercises-service)
             # The sets are already nested under exercises, so we can use exercise_list_id as key
             sets_by_exercise = {}
@@ -174,9 +173,9 @@ async def _get_actual_workout_sets(workout_id: int, headers: dict) -> dict[str, 
                 ex_list_id = ex.get("exercise_list_id")
                 if ex_list_id:
                     sets_by_exercise[str(ex_list_id)] = ex.get("sets", [])
-            
+
             return sets_by_exercise
-            
+
     except Exception as e:
         gateway_main.logger.error(
             "error_getting_actual_sets",
@@ -208,19 +207,19 @@ async def _assemble_workout_for_client(
                     "actual_sets_data_loaded",
                     workout_id=workout_id,
                     exercise_count=len(actual_sets_data),
-                    exercise_ids=list(actual_sets_data.keys())
+                    exercise_ids=list(actual_sets_data.keys()),
                 )
-                
+
                 # Create exercise instances from workouts data with actual sets
                 created_instances = []
                 for ex_idx, ex in enumerate(exercises):
                     ex_list_id = ex.get("exercise_id")
                     if ex_list_id is None:
                         continue
-                    
+
                     plan_sets = ex.get("sets", [])
                     actual_sets = actual_sets_data.get(str(ex_list_id), [])
-                    
+
                     sets_payload = []
                     for set_idx, s in enumerate(plan_sets):
                         # Get actual working_weight from database
@@ -233,9 +232,9 @@ async def _assemble_workout_for_client(
                                 exercise_list_id=ex_list_id,
                                 set_idx=set_idx,
                                 actual_weight=actual_weight,
-                                set_data=actual_sets[set_idx] if set_idx < len(actual_sets) else None
+                                set_data=actual_sets[set_idx] if set_idx < len(actual_sets) else None,
                             )
-                        
+
                         reps = s.get("volume")
                         if reps is None:
                             reps = s.get("reps")
@@ -250,17 +249,19 @@ async def _assemble_workout_for_client(
                                 "order": set_idx,
                             }
                         )
-                    
-                    created_instances.append({
-                        "id": None,  # Will be set by exercises-service when created
-                        "exercise_list_id": ex_list_id,
-                        "sets": sets_payload,
-                        "notes": ex.get("notes"),
-                        "order": ex_idx,
-                        "workout_id": workout_id,
-                        "user_max_id": None,
-                    })
-                
+
+                    created_instances.append(
+                        {
+                            "id": None,  # Will be set by exercises-service when created
+                            "exercise_list_id": ex_list_id,
+                            "sets": sets_payload,
+                            "notes": ex.get("notes"),
+                            "order": ex_idx,
+                            "workout_id": workout_id,
+                            "user_max_id": None,
+                        }
+                    )
+
                 if created_instances:
                     workout_data["exercise_instances"] = created_instances
             else:
@@ -280,6 +281,7 @@ async def _assemble_workout_for_client(
 
     instances = workout_data.get("exercise_instances")
     if isinstance(instances, list) and instances:
+
         def _instance_sort_key(item: dict) -> tuple[int, int]:
             if not isinstance(item, dict):
                 return (2**31 - 1, 2**31 - 1)
@@ -498,17 +500,17 @@ async def get_workout_grpc(
     """Get workout by ID using gRPC."""
     try:
         stub = await grpc_client_manager.get_workouts_stub()
-        
+
         request = workouts_pb2.GetWorkoutRequest(
             workout_id=workout_id,
             user_context=create_user_context(user_id),
         )
-        
+
         response = await stub.GetWorkout(request)
-        
+
         if not response.workout:
             raise HTTPException(status_code=404, detail="Workout not found")
-        
+
         # Convert proto workout to dict format
         workout_dict = {
             "id": response.workout.id,
@@ -521,32 +523,36 @@ async def get_workout_grpc(
             "plan_order_index": response.workout.plan_order_index,
             "exercise_instances": [],
         }
-        
+
         # Convert exercise instances
         for instance in response.workout.exercise_instances:
             sets = []
             for s in instance.sets:
-                sets.append({
-                    "id": s.id,
-                    "reps": s.reps,
-                    "working_weight": s.working_weight,
-                    "rpe": s.rpe,
-                    "effort": s.effort,
-                    "effort_type": s.effort_type,
-                    "intensity": s.intensity,
-                    "order": s.order,
-                })
-            
-            workout_dict["exercise_instances"].append({
-                "id": instance.id,
-                "exercise_list_id": instance.exercise_list_id,
-                "workout_id": instance.workout_id,
-                "sets": sets,
-                "notes": instance.notes,
-                "order": instance.order,
-                "user_max_id": instance.user_max_id,
-            })
-        
+                sets.append(
+                    {
+                        "id": s.id,
+                        "reps": s.reps,
+                        "working_weight": s.working_weight,
+                        "rpe": s.rpe,
+                        "effort": s.effort,
+                        "effort_type": s.effort_type,
+                        "intensity": s.intensity,
+                        "order": s.order,
+                    }
+                )
+
+            workout_dict["exercise_instances"].append(
+                {
+                    "id": instance.id,
+                    "exercise_list_id": instance.exercise_list_id,
+                    "workout_id": instance.workout_id,
+                    "sets": sets,
+                    "notes": instance.notes,
+                    "order": instance.order,
+                    "user_max_id": instance.user_max_id,
+                }
+            )
+
         return workout_dict
     except HTTPException:
         raise
@@ -555,72 +561,53 @@ async def get_workout_grpc(
         raise HTTPException(status_code=500, detail="Failed to fetch workout via gRPC")
 
 
-@workouts_router.get("/{workout_id}", response_model=schemas.WorkoutResponseWithExercises)
-async def get_workout(workout_id: int, request: Request):
-    """Get workout with exercise instances using gRPC."""
-    user = getattr(request.state, "user", None)
-    uid = user.get("uid") if user else None
-    if not uid:
-        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
-
-    stub = await grpc_client_manager.get_workouts_stub()
-    user_context = create_user_context(str(uid))
-
-    include = _parse_include_expand(request)
-    request_pb = workouts_pb2.GetWorkoutWithDetailsRequest(
-        workout_id=workout_id,
-        include_exercise_instances=True,
-        user_context=user_context,
-    )
-
-    try:
-        response = await stub.GetWorkoutWithDetails(request_pb, timeout=10.0)
-    except grpc.aio.AioRpcError as exc:
-        if exc.code() == grpc.StatusCode.NOT_FOUND:
-            return JSONResponse(status_code=404, content={"detail": "Workout not found"})
-        if exc.code() == grpc.StatusCode.PERMISSION_DENIED:
-            return JSONResponse(status_code=403, content={"detail": "Permission denied"})
-        raise
-
-    if not response.workout:
-        return JSONResponse(status_code=404, content={"detail": "Workout not found"})
-
-    workout_dict = {
-        "id": response.workout.id,
-        "name": response.workout.name,
-        "status": response.workout.status,
-        "workout_type": response.workout.workout_type,
-        "started_at": response.workout.started_at if response.workout.started_at else None,
-        "completed_at": response.workout.finished_at if response.workout.finished_at else None,
-        "applied_plan_id": response.workout.applied_plan_id,
-        "plan_order_index": response.workout.plan_order_index,
-        "exercise_instances": [],
+def _client_set(data: dict) -> dict:
+    """Сохранить части составного подхода и имена полей мобильного клиента."""
+    effort = data.get("effort", data.get("rpe"))
+    return {
+        **data,
+        "reps": data.get("volume", data.get("reps")),
+        "working_weight": data.get("working_weight", data.get("weight")),
+        "rpe": effort,
+        "effort": effort,
+        "effort_type": "RPE",
+        "order": data.get("order_index", data.get("order")),
+        "subsets": [_client_set(part) for part in data.get("subsets") or []],
     }
 
-    for instance in response.workout.exercise_instances:
-        instance_dict = {
-            "id": instance.id,
-            "exercise_list_id": instance.exercise_list_id,
-            "workout_id": instance.workout_id,
-            "sets": [],
-            "notes": instance.notes,
-            "order": instance.order,
-            "user_max_id": instance.user_max_id,
-        }
-        for s in instance.sets:
-            instance_dict["sets"].append({
-                "id": s.id,
-                "reps": s.reps,
-                "working_weight": s.working_weight,
-                "rpe": s.rpe,
-                "effort": s.effort,
-                "effort_type": s.effort_type,
-                "intensity": s.intensity,
-                "order": s.order,
-            })
-        workout_dict["exercise_instances"].append(instance_dict)
 
-    return JSONResponse(content=workout_dict)
+@workouts_router.get("/{workout_id}", response_model=schemas.WorkoutResponseWithExercises)
+async def get_workout(workout_id: int, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or not user.get("uid"):
+        raise HTTPException(401, "Not authenticated")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{gateway_main.WORKOUTS_SERVICE_URL}/workouts/{workout_id}",
+                headers=gateway_main._forward_headers(request),
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(502, "Не удалось загрузить тренировку") from exc
+    if response.status_code != 200:
+        return Response(
+            content=response.content, status_code=response.status_code, media_type=response.headers.get("content-type")
+        )
+    workout = response.json()
+    for instance in workout["exercise_instances"]:
+        instance["workout_id"] = workout_id
+        instance.setdefault("user_max_id", None)
+        sets = sorted(
+            instance["sets"], key=lambda s: (s.get("order_index") is None, s.get("order_index") or 0, s["id"])
+        )
+        instance["sets"] = [_client_set(s) for s in sets]
+    return JSONResponse(content=workout)
+
+
+@workouts_router.get("/sessions/{workout_id}/macro-suggestion")
+async def get_macro_suggestion(workout_id: int, request: Request) -> Response:
+    target_url = f"{gateway_main.WORKOUTS_SERVICE_URL}/workouts/sessions/{workout_id}/macro-suggestion"
+    return await gateway_main._proxy_request(request, target_url, gateway_main._forward_headers(request))
 
 
 @workouts_router.get("/sessions/{workout_id}/history")
@@ -662,16 +649,18 @@ async def get_workout_session_history(workout_id: int, request: Request) -> Resp
                 "user_max_id": instance.user_max_id,
             }
             for s in instance.sets:
-                instance_dict["sets"].append({
-                    "id": s.id,
-                    "reps": s.reps,
-                    "working_weight": s.working_weight,
-                    "rpe": s.rpe,
-                    "effort": s.effort,
-                    "effort_type": s.effort_type,
-                    "intensity": s.intensity,
-                    "order": s.order,
-                })
+                instance_dict["sets"].append(
+                    {
+                        "id": s.id,
+                        "reps": s.reps,
+                        "working_weight": s.working_weight,
+                        "rpe": s.rpe,
+                        "effort": s.effort,
+                        "effort_type": s.effort_type,
+                        "intensity": s.intensity,
+                        "order": s.order,
+                    }
+                )
             session_dict["exercise_instances"].append(instance_dict)
         sessions_list.append(session_dict)
 
@@ -700,7 +689,7 @@ async def get_all_workouts_sessions_history(request: Request) -> Response:
         # Filter out empty/None date strings
         started_at = session.started_at if session.started_at and session.started_at.strip() else None
         finished_at = session.finished_at if session.finished_at and session.finished_at.strip() else None
-        
+
         session_dict = {
             "id": session.id,
             "workout_id": session.workout_id,
@@ -712,7 +701,7 @@ async def get_all_workouts_sessions_history(request: Request) -> Response:
             session_dict["started_at"] = started_at
         if finished_at:
             session_dict["finished_at"] = finished_at
-            
+
         for instance in session.exercise_instances:
             instance_dict = {
                 "id": instance.id,
@@ -724,16 +713,18 @@ async def get_all_workouts_sessions_history(request: Request) -> Response:
                 "user_max_id": instance.user_max_id,
             }
             for s in instance.sets:
-                instance_dict["sets"].append({
-                    "id": s.id,
-                    "reps": s.reps,
-                    "working_weight": s.working_weight,
-                    "rpe": s.rpe,
-                    "effort": s.effort,
-                    "effort_type": s.effort_type,
-                    "intensity": s.intensity,
-                    "order": s.order,
-                })
+                instance_dict["sets"].append(
+                    {
+                        "id": s.id,
+                        "reps": s.reps,
+                        "working_weight": s.working_weight,
+                        "rpe": s.rpe,
+                        "effort": s.effort,
+                        "effort_type": s.effort_type,
+                        "intensity": s.intensity,
+                        "order": s.order,
+                    }
+                )
             session_dict["exercise_instances"].append(instance_dict)
         sessions_list.append(session_dict)
 
@@ -844,16 +835,18 @@ async def get_next_workout_in_plan(workout_id: int, request: Request):
             "user_max_id": instance.user_max_id,
         }
         for s in instance.sets:
-            instance_dict["sets"].append({
-                "id": s.id,
-                "reps": s.reps,
-                "working_weight": s.working_weight,
-                "rpe": s.rpe,
-                "effort": s.effort,
-                "effort_type": s.effort_type,
-                "intensity": s.intensity,
-                "order": s.order,
-            })
+            instance_dict["sets"].append(
+                {
+                    "id": s.id,
+                    "reps": s.reps,
+                    "working_weight": s.working_weight,
+                    "rpe": s.rpe,
+                    "effort": s.effort,
+                    "effort_type": s.effort_type,
+                    "intensity": s.intensity,
+                    "order": s.order,
+                }
+            )
         workout_dict["exercise_instances"].append(instance_dict)
 
     return JSONResponse(content=workout_dict)
@@ -978,23 +971,25 @@ async def start_workout(workout_id: int, request: Request):
             "user_max_id": instance.user_max_id,
         }
         for s in instance.sets:
-            instance_dict["sets"].append({
-                "id": s.id,
-                "reps": s.reps,
-                "working_weight": s.working_weight,
-                "rpe": s.rpe,
-                "effort": s.effort,
-                "effort_type": s.effort_type,
-                "intensity": s.intensity,
-                "order": s.order,
-            })
+            instance_dict["sets"].append(
+                {
+                    "id": s.id,
+                    "reps": s.reps,
+                    "working_weight": s.working_weight,
+                    "rpe": s.rpe,
+                    "effort": s.effort,
+                    "effort_type": s.effort_type,
+                    "intensity": s.intensity,
+                    "order": s.order,
+                }
+            )
         workout_dict["exercise_instances"].append(instance_dict)
 
     return JSONResponse(content=workout_dict)
 
 
-@workouts_router.get("/sessions/{workout_id}/active")
-async def get_active_workout_session(workout_id: int, request: Request) -> Response:
+@workouts_router.get("/sessions/{workout_id}/active", name="get_active_workout_session")
+async def _get_active_workout_session_details(workout_id: int, request: Request) -> Response:
     """Get active workout session using gRPC."""
     user = getattr(request.state, "user", None)
     uid = user.get("uid") if user else None
@@ -1020,8 +1015,12 @@ async def get_active_workout_session(workout_id: int, request: Request) -> Respo
     if not response.session:
         return JSONResponse(status_code=404, content={"detail": "Active session not found"})
 
-    started_at = response.session.started_at if response.session.started_at and response.session.started_at.strip() else None
-    finished_at = response.session.finished_at if response.session.finished_at and response.session.finished_at.strip() else None
+    started_at = (
+        response.session.started_at if response.session.started_at and response.session.started_at.strip() else None
+    )
+    finished_at = (
+        response.session.finished_at if response.session.finished_at and response.session.finished_at.strip() else None
+    )
 
     session_dict = {
         "id": response.session.id,
@@ -1135,16 +1134,18 @@ async def finish_workout(workout_id: int, request: Request):
             "user_max_id": instance.user_max_id,
         }
         for s in instance.sets:
-            instance_dict["sets"].append({
-                "id": s.id,
-                "reps": s.reps,
-                "working_weight": s.working_weight,
-                "rpe": s.rpe,
-                "effort": s.effort,
-                "effort_type": s.effort_type,
-                "intensity": s.intensity,
-                "order": s.order,
-            })
+            instance_dict["sets"].append(
+                {
+                    "id": s.id,
+                    "reps": s.reps,
+                    "working_weight": s.working_weight,
+                    "rpe": s.rpe,
+                    "effort": s.effort,
+                    "effort_type": s.effort_type,
+                    "intensity": s.intensity,
+                    "order": s.order,
+                }
+            )
         workout_dict["exercise_instances"].append(instance_dict)
 
     return JSONResponse(content=workout_dict)
@@ -1197,16 +1198,18 @@ async def get_active_workout_session(workout_id: int, request: Request) -> Respo
             "user_max_id": instance.user_max_id,
         }
         for s in instance.sets:
-            instance_dict["sets"].append({
-                "id": s.id,
-                "reps": s.reps,
-                "working_weight": s.working_weight,
-                "rpe": s.rpe,
-                "effort": s.effort,
-                "effort_type": s.effort_type,
-                "intensity": s.intensity,
-                "order": s.order,
-            })
+            instance_dict["sets"].append(
+                {
+                    "id": s.id,
+                    "reps": s.reps,
+                    "working_weight": s.working_weight,
+                    "rpe": s.rpe,
+                    "effort": s.effort,
+                    "effort_type": s.effort_type,
+                    "intensity": s.intensity,
+                    "order": s.order,
+                }
+            )
         session_dict["exercise_instances"].append(instance_dict)
 
     return JSONResponse(content=session_dict)

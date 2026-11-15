@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from backend_common.workout_sets import integer_change
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class MacroMetric(str, Enum):
@@ -148,6 +150,7 @@ class MacroTrigger(BaseModel):
 
 
 class MacroCondition(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     op: MacroConditionOp
     value: float | None = None
     range: list[float] | None = Field(None, min_length=2, max_length=2)
@@ -208,7 +211,10 @@ class MacroCondition(BaseModel):
                 raise ValueError("condition.n_sets is required for holds_for_sets")
             if values.relation is None:
                 raise ValueError("condition.relation is required for holds_for_sets")
-            if values.value is None:
+            if values.relation in {MacroConditionRelation.IN_RANGE, MacroConditionRelation.NOT_IN_RANGE}:
+                if values.range is None:
+                    raise ValueError("condition.range is required for holds_for_sets")
+            elif values.value is None:
                 raise ValueError("condition.value is required for holds_for_sets")
         return values
 
@@ -241,7 +247,6 @@ class MacroAction(BaseModel):
                 require_keys(["value"])
             if mode == AdjustLoadMode.TO_TARGET.value:
                 require_keys(["value"])
-                cls._ensure_rpc_available("Adjust_Load", "to_Target")
 
         elif action_type == MacroActionType.ADJUST_REPS:
             mode = params.get("mode")
@@ -251,7 +256,6 @@ class MacroAction(BaseModel):
                 require_keys(["value"])
             if mode == AdjustRepsMode.TO_TARGET.value:
                 require_keys(["value"])
-                cls._ensure_rpc_available("Adjust_Reps", "to_Target")
 
         elif action_type == MacroActionType.ADJUST_SETS:
             mode = params.get("mode")
@@ -273,20 +277,28 @@ class MacroAction(BaseModel):
             ):
                 raise ValueError("Inject_Mesocycle by_Existing requires source_mesocycle_id or mesocycle_id")
 
+        if action_type != MacroActionType.INJECT_MESOCYCLE:
+            raw = params["value"]
+            if isinstance(raw, bool):
+                raise ValueError("Ожидается числовое значение действия")
+            if params["mode"] == "by_Value":
+                params["value"] = integer_change(raw)
+                return values
+            try:
+                number = float(raw)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("Ожидается числовое значение действия") from exc
+            if not math.isfinite(number):
+                raise ValueError("Значение действия должно быть конечным")
+            mode = params["mode"]
+            if mode == "to_Target" and not 1 <= number <= 10:
+                raise ValueError("Целевой RPE должен быть от 1 до 10")
+            if mode == "by_Percent" and number <= -100:
+                raise ValueError("Изменение нагрузки должно быть больше -100%")
+            if mode == "by_Value" and not number.is_integer():
+                raise ValueError("Количество повторов и подходов должно быть целым")
+            params["value"] = int(number) if mode == "by_Value" else number
         return values
-
-    @staticmethod
-    def _ensure_rpc_available(action: str, mode: str) -> None:
-        try:
-            from ..services.macro_engine import rpc_get_intensity, rpc_get_volume
-        except Exception:  # pragma: no cover - import issue
-            rpc_get_intensity = None
-            rpc_get_volume = None
-
-        if action == "Adjust_Load" and mode == "to_Target" and rpc_get_intensity is None:
-            raise ValueError("Adjust_Load to_Target requires RPE RPC get_intensity")
-        if action == "Adjust_Reps" and mode == "to_Target" and rpc_get_volume is None:
-            raise ValueError("Adjust_Reps to_Target requires RPE RPC get_volume")
 
 
 class MacroRule(BaseModel):

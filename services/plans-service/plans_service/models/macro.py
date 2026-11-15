@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
-from .calendar import Base, _utc_now
+from .calendar import Base
+
+
+def _utc_now():
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class PlanMacro(Base):

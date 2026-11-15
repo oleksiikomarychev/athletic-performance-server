@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import (
     JSON,
@@ -18,7 +18,7 @@ Base = declarative_base()
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class CalendarPlan(Base):
@@ -124,6 +124,8 @@ class AppliedPlanWorkout(Base):
     workout_id = Column(Integer, nullable=False)
     order_index = Column(Integer, nullable=False)
     nutrition_plan = Column(JSON, nullable=True)
+    macro_weight_settings = Column(JSON, nullable=True)
+    session_advanced = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
     applied_plan = relationship("AppliedCalendarPlan", back_populates="workouts")
 

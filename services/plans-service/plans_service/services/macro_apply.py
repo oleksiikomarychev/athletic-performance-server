@@ -1,170 +1,82 @@
-from __future__ import annotations
-
 import os
-from typing import Any
 
-import structlog
-
-try:
-    import httpx
-except ImportError:
-    httpx = None
-
-
-logger = structlog.get_logger(__name__)
-
+import httpx
+from fastapi import HTTPException
+from sqlalchemy import select
 
 from ..config import settings
+from ..models.calendar import AppliedCalendarPlan
+from ..schemas.macro import MacroRule
+from .applied_calendar_plan_service import AppliedCalendarPlanService
+from .macro_engine import MacroEngine
 
 
-class MacroApplier:
-    def __init__(self, user_id: str) -> None:
-        self.user_id = user_id
-        ex_base = os.getenv("EXERCISES_SERVICE_URL") or getattr(settings, "EXERCISES_SERVICE_URL", "http://exercises-service:8002")
-        self.exercises_base = ex_base.rstrip("/")
-        wo_base = os.getenv("WORKOUTS_SERVICE_URL") or getattr(settings, "WORKOUTS_SERVICE_URL", "http://workouts-service:8004")
-        self.workouts_base = wo_base.rstrip("/")
+async def _workouts(user_id, path, payload=None):
+    secret = os.getenv("INTERNAL_GATEWAY_SECRET")
+    if not secret:
+        raise HTTPException(503, "Не настроена запись макросов")
+    headers = {"X-User-Id": user_id, "X-Internal-Secret": secret}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            res = await client.post(
+                f"{settings.WORKOUTS_SERVICE_URL}/internal/macro-previews/{path}", headers=headers, json=payload
+            )
+            if res.status_code in (404, 409):
+                raise HTTPException(res.status_code, res.json().get("detail"))
+            res.raise_for_status()
+            return res.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, "Не удалось подтвердить результат в workouts-service") from exc
 
-    async def apply(self, preview: dict[str, Any]) -> dict[str, Any]:
-        if not httpx:
-            return {"applied": 0, "errors": ["httpx not available"], "details": []}
-        patches = self._collect_patches(preview)
-        logger.info("MacroApplier.apply start | user_id=%s patches_total=%d", self.user_id, len(patches))
-        if not patches:
-            return {"applied": 0, "errors": [], "details": []}
 
-        grouped: dict[int, dict[int, list[dict[str, Any]]]] = {}
-        for p in patches:
-            wid = int(p.get("workout_id"))
-            eid = int(p.get("exercise_id")) if p.get("exercise_id") is not None else -1
-            grouped.setdefault(wid, {}).setdefault(eid, []).append(p)
-        applied = 0
-        errors: list[str] = []
-        details: list[dict[str, Any]] = []
+async def preview_macros(db, user_id, plan_id, index_offset, observation_workout_id=None, legacy_weights=None):
+    engine = MacroEngine(db, user_id)
+    if await engine._load_applied_plan(plan_id) is None:
+        raise HTTPException(404, "План не найден")
+    engine.executed = {tuple(row) for row in await _workouts(user_id, f"{plan_id}/executions")}
+    result = await engine.run_for_applied_plan(
+        plan_id, index_offset=index_offset, observation_workout_id=observation_workout_id, legacy_weights=legacy_weights
+    )
+    effects = result.pop("effects")
+    result["contract_version"] = 2
+    result["set_changes_count"] = len(effects)
+    if effects:
+        result.update(await _workouts(user_id, str(plan_id), effects))
+    return result
 
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            for wid, per_ex in grouped.items():
-                instances = await self._fetch_instances(client, wid)
 
-                by_ex: dict[int, dict[str, Any]] = {}
-                for inst in instances:
-                    try:
-                        exid = int(inst.get("exercise_list_id"))
-                        by_ex[exid] = inst
-                    except (TypeError, ValueError):
-                        continue
-                for eid, actions in per_ex.items():
-                    logger.info(
-                        "MacroApplier.apply attempt | workout_id=%s exercise_id=%s actions=%d",
-                        wid,
-                        eid,
-                        len(actions),
-                    )
-                    inst = by_ex.get(eid)
-                    if not inst:
-                        logger.warning(
-                            "MacroApplier.apply skip | workout_id=%s exercise_id=%s reason=no_instance",
-                            wid,
-                            eid,
-                        )
-                        continue
+async def apply_macros(db, user_id, plan_id, preview_id=None, index_offset=0, mesocycles_only=False):
+    if preview_id:
+        owner = await db.scalar(
+            select(AppliedCalendarPlan.id).where(
+                AppliedCalendarPlan.id == plan_id, AppliedCalendarPlan.user_id == user_id
+            )
+        )
+        if owner is None:
+            raise HTTPException(404, "План не найден")
+        return {"apply_result": await _workouts(user_id, f"{plan_id}/{preview_id}/confirm"), "plan_changes": []}
 
-                    sets = list(inst.get("sets") or [])
-                    changed = False
-                    for act in actions:
-                        ch = act.get("changes") or {}
-                        if ch.get("action") == "add_set":
-                            tpl = ch.get("template") or {}
-                            new_set = {
-                                "reps": tpl.get("volume"),
-                                "weight": None,
-                                "rpe": tpl.get("effort"),
-                                "intensity": tpl.get("intensity"),
-                                "volume": tpl.get("volume"),
-                                "effort": tpl.get("effort"),
-                            }
-                            sets.append(new_set)
-                            changed = True
-                        elif ch.get("action") == "remove_set":
-                            sid = act.get("set_id")
-                            if sid is not None:
-                                sets = [s for s in sets if int(s.get("id")) != int(sid)]
-                                changed = True
-                        else:
-                            sid = act.get("set_id")
-                            for i, s in enumerate(sets):
-                                if sid is not None and int(s.get("id")) == int(sid):
-                                    updated = dict(s)
-                                    if "volume" in ch:
-                                        updated["reps"] = ch["volume"]
-                                        updated["volume"] = ch["volume"]
-                                    if "intensity" in ch:
-                                        updated["intensity"] = ch["intensity"]
-                                    if "weight" in ch or "working_weight" in ch:
-                                        val = (
-                                            ch.get("weight")
-                                            if ch.get("weight") is not None
-                                            else ch.get("working_weight")
-                                        )
-                                        updated["weight"] = val
-                                    sets[i] = updated
-                                    changed = True
-                                    break
-                    if not changed:
-                        logger.info(
-                            "MacroApplier.apply no_changes | workout_id=%s exercise_id=%s",
-                            wid,
-                            eid,
-                        )
-                        continue
-
-                    ok = await self._put_instance(client, inst, sets)
-                    if ok:
-                        applied += 1
-                        details.append({"workout_id": wid, "exercise_id": eid, "sets_count": len(sets)})
-                        logger.info(
-                            "MacroApplier.apply success | workout_id=%s exercise_id=%s sets_count=%d",
-                            wid,
-                            eid,
-                            len(sets),
-                        )
-                    else:
-                        errors.append(f"Failed to update instance for workout {wid} exercise {eid}")
-                        logger.error(
-                            "MacroApplier.apply failed | workout_id=%s exercise_id=%s",
-                            wid,
-                            eid,
-                        )
-        return {"applied": applied, "errors": errors, "details": details}
-
-    def _collect_patches(self, preview: dict[str, Any]) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for item in preview.get("preview", []) or []:
-            for p in item.get("patches", []) or []:
-                out.append(p)
-        return out
-
-    async def _fetch_instances(self, client: httpx.AsyncClient, workout_id: int) -> list[dict[str, Any]]:
-        url = f"{self.exercises_base}/exercises/instances/workouts/{workout_id}/instances"
-        headers = {"X-User-Id": self.user_id}
-        try:
-            res = await client.get(url, headers=headers)
-            if res.status_code == 200 and isinstance(res.json(), list):
-                return res.json()
-        except (httpx.RequestError, httpx.HTTPStatusError, ValueError):
-            return []
-        return []
-
-    async def _put_instance(self, client: httpx.AsyncClient, inst: dict[str, Any], sets: list[dict[str, Any]]) -> bool:
-        inst_id = inst.get("id")
-        if inst_id is None:
-            return False
-        url = f"{self.exercises_base}/exercises/instances/{inst_id}"
-        headers = {"X-User-Id": self.user_id}
-        payload = dict(inst)
-        payload["sets"] = sets
-        try:
-            res = await client.put(url, json=payload, headers=headers)
-            return res.status_code in (200, 201)
-        except (httpx.RequestError, httpx.HTTPStatusError):
-            return False
+    engine = MacroEngine(db, user_id)
+    plan = await engine._load_applied_plan(plan_id)
+    if plan is None:
+        raise HTTPException(404, "План не найден")
+    if not mesocycles_only:
+        macros = await engine._load_plan_macros(plan.calendar_plan_id)
+        if any(MacroRule.model_validate_json(m.rule_json).action.type != "Inject_Mesocycle" for m in macros):
+            raise HTTPException(409, "Для изменений подходов обновите и подтвердите предпросмотр")
+    summary = await engine.run_for_applied_plan(plan_id, index_offset=index_offset, mesocycles_only=True)
+    service = AppliedCalendarPlanService(db, user_id)
+    results = []
+    for item in summary["preview"]:
+        for change in item["plan_changes"]:
+            p = change["params"]
+            results.append(
+                await service.inject_mesocycle_into_applied_plan(
+                    plan_id,
+                    mode=p["mode"],
+                    template_id=p.get("template_id"),
+                    source_mesocycle_id=p.get("source_mesocycle_id") or p.get("mesocycle_id"),
+                    placement=p.get("placement"),
+                )
+            )
+    return {"preview": summary, "plan_changes": results, "apply_result": {"applied": 0, "errors": [], "details": []}}

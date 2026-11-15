@@ -2,6 +2,7 @@ from typing import Any
 
 import structlog
 from backend_common.cache import CacheHelper, CacheMetrics
+from backend_common.workout_sets import SetSnapshot, validate_sets
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -145,6 +146,29 @@ class ExerciseInstanceService:
             except Exception:
                 logger.warning("workout_exercise_cache_invalidate_failed", keys=keys, exc_info=True)
 
+    async def _lock_workout(self, workout_id):
+        workout = await self.db.scalar(
+            select(models.Workout)
+            .where(models.Workout.id == workout_id, models.Workout.user_id == self.user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if workout is None:
+            raise ValueError("Workout not found")
+
+    async def _lock_instance(self, instance_id, *, missing_ok=False):
+        workout_id = await self.db.scalar(
+            select(models.WorkoutExercise.workout_id).where(
+                models.WorkoutExercise.id == instance_id, models.WorkoutExercise.user_id == self.user_id
+            )
+        )
+        if workout_id is None:
+            if missing_ok:
+                return False
+            raise ValueError("Exercise instance not found")
+        await self._lock_workout(workout_id)
+        return True
+
     async def create_instance(
         self, workout_id: int, instance_data: workout_schemas.WorkoutExerciseInstanceCreate, *, commit: bool = True
     ) -> dict[str, Any]:
@@ -156,6 +180,8 @@ class ExerciseInstanceService:
         if logger.isEnabledFor(10):
             logger.debug("exercise_instance_payload", payload=instance_data.model_dump())
 
+        await self._lock_workout(workout_id)
+        validate_sets([part.model_dump() for part in instance_data.sets or []])
         ex = models.WorkoutExercise(
             user_id=self.user_id,
             workout_id=workout_id,
@@ -203,11 +229,12 @@ class ExerciseInstanceService:
     async def update_instance(
         self, instance_id: int, update_data: workout_schemas.WorkoutExerciseInstanceUpdate, *, commit: bool = True
     ) -> dict[str, Any]:
+        await self._lock_instance(instance_id)
         stmt = select(models.WorkoutExercise).where(
             models.WorkoutExercise.id == instance_id,
             models.WorkoutExercise.user_id == self.user_id,
         )
-        res = await self.db.execute(stmt)
+        res = await self.db.execute(stmt.with_for_update().execution_options(populate_existing=True))
         db_instance = res.scalars().first()
         if db_instance is None:
             raise ValueError("Exercise instance not found")
@@ -242,6 +269,7 @@ class ExerciseInstanceService:
         return serialized
 
     async def update_set(self, instance_id: int, set_id: int, update_data: dict, *, commit: bool = True) -> dict:
+        await self._lock_instance(instance_id)
         stmt = (
             select(models.WorkoutSet, models.WorkoutExercise.workout_id)
             .join(models.WorkoutExercise, models.WorkoutSet.exercise_id == models.WorkoutExercise.id)
@@ -251,7 +279,7 @@ class ExerciseInstanceService:
                 models.WorkoutExercise.user_id == self.user_id,
             )
         )
-        res = await self.db.execute(stmt)
+        res = await self.db.execute(stmt.with_for_update().execution_options(populate_existing=True))
         row = res.first()
         if row is None:
             raise ValueError("Set not found")
@@ -273,13 +301,16 @@ class ExerciseInstanceService:
         if "subsets" in update_data:
             db_set.subsets = update_data.get("subsets")
 
+        SetSnapshot.parse(
+            {key: getattr(db_set, key) for key in ("volume", "intensity", "effort", "working_weight", "subsets")}
+        )
         if not commit:
             await self.db.flush()
             return {"id": db_set.id}
         await self.db.commit()
 
-        refreshed = await self.get_instance(instance_id)
         await self._invalidate_local_cache(workout_id=workout_id, instance_id=instance_id)
+        refreshed = await self.get_instance(instance_id)
         await invalidate_workout_cache(self.user_id, workout_ids=[workout_id])
         if refreshed is not None:
             await self._cache_instance(workout_exercise_key(self.user_id, instance_id), refreshed)
@@ -287,6 +318,7 @@ class ExerciseInstanceService:
         return {}
 
     async def delete_set(self, instance_id: int, set_id: int) -> None:
+        await self._lock_instance(instance_id)
         stmt = (
             select(models.WorkoutSet, models.WorkoutExercise.workout_id)
             .join(models.WorkoutExercise, models.WorkoutSet.exercise_id == models.WorkoutExercise.id)
@@ -296,7 +328,7 @@ class ExerciseInstanceService:
                 models.WorkoutExercise.user_id == self.user_id,
             )
         )
-        res = await self.db.execute(stmt)
+        res = await self.db.execute(stmt.with_for_update().execution_options(populate_existing=True))
         row = res.first()
         if row is None:
             raise ValueError("Set not found")
@@ -309,6 +341,8 @@ class ExerciseInstanceService:
         await invalidate_workout_cache(self.user_id, workout_ids=[workout_id])
 
     async def delete_instance(self, instance_id: int) -> None:
+        if not await self._lock_instance(instance_id, missing_ok=True):
+            return
         stmt = select(models.WorkoutExercise).where(
             models.WorkoutExercise.id == instance_id,
             models.WorkoutExercise.user_id == self.user_id,

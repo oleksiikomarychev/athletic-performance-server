@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from ..config import settings
 from ..database import get_db
-from ..models import Workout, WorkoutSession
+from ..models import MacroExecution, MacroPreview, Workout, WorkoutSession
 from ..redis_client import get_redis, invalidate_workout_cache
 
 router = APIRouter(prefix="/internal/users", tags=["internal"])
@@ -62,6 +62,8 @@ async def purge_user(
     if not expected_secret or x_internal_secret != expected_secret:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
+    await db.execute(delete(MacroExecution).where(MacroExecution.user_id == user_id))
+    await db.execute(delete(MacroPreview).where(MacroPreview.user_id == user_id))
     await db.execute(delete(WorkoutSession).where(WorkoutSession.user_id == user_id))
     await db.execute(delete(Workout).where(Workout.user_id == user_id))
     await db.commit()

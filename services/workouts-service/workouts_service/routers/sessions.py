@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import schemas as sm
@@ -12,6 +13,7 @@ from ..exceptions import (
     ActiveSessionNotFoundException,
     SessionNotFoundException,
 )
+from ..models import WorkoutSession
 from ..services.session_service import SessionService
 from ..tasks.session_tasks import finish_session_postprocess_task
 
@@ -80,6 +82,22 @@ async def get_active_session(workout_id: int, session_service: SessionService = 
     if not session:
         raise ActiveSessionNotFoundException(workout_id)
     return sm.WorkoutSessionResponse(**session.__dict__)
+
+
+@router.get("/{workout_id}/macro-suggestion")
+async def macro_suggestion(
+    workout_id: int, db: AsyncSession = Depends(get_db), user_id: str = Depends(get_current_user_id)
+):
+    return await db.scalar(
+        select(WorkoutSession.macro_suggestion)
+        .where(
+            WorkoutSession.workout_id == workout_id,
+            WorkoutSession.user_id == user_id,
+            WorkoutSession.finished_at.is_not(None),
+        )
+        .order_by(WorkoutSession.id.desc())
+        .limit(1)
+    )
 
 
 @router.get("/{workout_id}/history", response_model=list[sm.WorkoutSessionResponse])

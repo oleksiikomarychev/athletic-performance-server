@@ -14,6 +14,7 @@ from .redis_client import close_redis, init_redis
 from .routers.analytics import router as analytics_router
 from .routers.exercise_instance_router import router as instances_router
 from .routers.internal_purge import router as internal_purge_router
+from .routers.macro_previews import router as macro_previews_router
 from .routers.sessions import router as sessions_router
 from .routers.workout_generation import router as workout_generation_router
 from .routers.workouts import router as workouts_router
@@ -63,3 +64,5 @@ app.include_router(workout_generation_router, prefix="/workouts")
 app.include_router(analytics_router, prefix="/workouts")
 app.include_router(instances_router, prefix="/workouts")
 app.include_router(internal_purge_router)
+
+app.include_router(macro_previews_router)

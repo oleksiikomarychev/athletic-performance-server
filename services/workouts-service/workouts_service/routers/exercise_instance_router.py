@@ -77,7 +77,10 @@ async def update_exercise_set(
 ):
     service = ExerciseInstanceService(db, user_id)
     update_data = payload.model_dump(exclude_unset=True)
-    result = await service.update_set(instance_id, set_id, update_data)
+    try:
+        result = await service.update_set(instance_id, set_id, update_data)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     return workout_schemas.WorkoutExerciseResponse.model_validate(result)
 
 
@@ -121,9 +124,7 @@ async def create_exercise_instances_batch(
 
 @router.post("/migrate-set-ids", status_code=status.HTTP_200_OK)
 async def migrate_set_ids(
-    batch_size: int = 1000,
-    db: AsyncSession = Depends(get_db), 
-    user_id: str = Depends(get_current_user_id)
+    batch_size: int = 1000, db: AsyncSession = Depends(get_db), user_id: str = Depends(get_current_user_id)
 ):
     stmt = (
         select(models.WorkoutSet)

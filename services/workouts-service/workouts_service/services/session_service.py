@@ -1,5 +1,6 @@
 import os
 import re
+from copy import deepcopy
 from datetime import UTC, datetime
 
 import httpx
@@ -26,6 +27,7 @@ from ..redis_client import (
     SESSION_DETAIL_TTL_SECONDS,
     get_redis,
     invalidate_session_cache,
+    invalidate_workout_cache,
     session_detail_key,
     session_list_key,
 )
@@ -63,9 +65,30 @@ class SessionService:
     async def _set_cached_session_list(self, payload: list[dict]) -> None:
         await self._cache.set(session_list_key(self.user_id), payload)
 
+    @staticmethod
+    def _macro_set_snapshot(workout):
+        return {
+            str(i.id): {
+                str(s.id): {
+                    "volume": s.volume,
+                    "effort": s.effort,
+                    "working_weight": s.working_weight,
+                    "order_index": s.order_index,
+                    "set_type": s.set_type,
+                    "subsets": deepcopy(s.subsets),
+                }
+                for s in i.sets
+            }
+            for i in workout.exercises
+        }
+
     async def start_workout_session(self, workout_id: int, started_at: datetime | None = None) -> WorkoutSession:
         result = await self.db.execute(
-            select(Workout).filter(Workout.id == workout_id).filter(Workout.user_id == self.user_id).with_for_update()
+            select(Workout)
+            .options(selectinload(Workout.exercises).selectinload(WorkoutExercise.sets))
+            .filter(Workout.id == workout_id)
+            .filter(Workout.user_id == self.user_id)
+            .with_for_update()
         )
         workout = result.scalars().first()
         if not workout:
@@ -91,11 +114,20 @@ class SessionService:
             started_at = started_at.replace(tzinfo=UTC)
 
         naive_started_at = started_at.replace(tzinfo=None)
+        if workout.applied_plan_id:
+            for instance in workout.exercises:
+                for part_set in instance.sets:
+                    if part_set.subsets:
+                        part_set.subsets = [
+                            dict(part, macro_part_id=part.get("macro_part_id", f"{part_set.id}:{idx}"))
+                            for idx, part in enumerate(part_set.subsets)
+                        ]
 
         session = WorkoutSession(
             workout_id=workout_id,
             started_at=naive_started_at,
             status="active",
+            progress={"macro_baseline": self._macro_set_snapshot(workout)} if workout.applied_plan_id else {},
             user_id=self.user_id,
         )
         self.db.add(session)
@@ -109,6 +141,7 @@ class SessionService:
         except Exception:
             logger.exception("Failed to increment WORKOUT_SESSIONS_STARTED_TOTAL")
 
+        await invalidate_workout_cache(self.user_id, workout_ids=[workout_id])
         await invalidate_session_cache(self.user_id, session_ids=[session.id])
         logger.info(
             "session_created",
@@ -243,12 +276,21 @@ class SessionService:
         workout = result.scalars().first()
 
         if workout:
+            if workout.applied_plan_id:
+                session.progress = {
+                    **(session.progress or {}),
+                    "macro_actuals": self._macro_set_snapshot(workout),
+                    "macro_completed": deepcopy((session.progress or {}).get("completed") or {}),
+                    "macro_metrics": {"Readiness_Score": workout.readiness_score, "RPE_Session": workout.rpe_session},
+                    "macro_exercises": {str(i.id): i.exercise_id for i in workout.exercises},
+                }
             if not workout.completed_at:
                 workout.completed_at = finished_at
             workout.status = "completed"
 
         await self.db.commit()
         await self.db.refresh(session)
+        await invalidate_workout_cache(self.user_id, workout_ids=[session.workout_id])
         await invalidate_session_cache(self.user_id, session_ids=[session.id])
 
         return session
@@ -344,7 +386,9 @@ class SessionService:
             raise SessionNotFoundException(session_id)
 
         workout_id = session.workout_id
-        instances = await self._fetch_instances_from_exercises_service(workout_id)
+        from .exercise_instance_service import ExerciseInstanceService
+
+        instances = await ExerciseInstanceService(self.db, self.user_id).get_instances_by_workout(workout_id)
 
         new_completed: dict[str, list[int]] = {}
         if completed:
@@ -475,15 +519,19 @@ class SessionService:
         )
         return payload
 
-    async def _compute_macro_suggestion(self, applied_plan_id: int) -> dict | None:
+    async def _compute_macro_suggestion(self, applied_plan_id: int, workout_id: int) -> dict | None:
         base_url = os.getenv("PLANS_SERVICE_URL", "http://plans-service:8005").rstrip("/")
-        url = f"{base_url}/plans/applied-plans/{applied_plan_id}/run-macros"
+        url = f"{base_url}/plans/applied-plans/{applied_plan_id}/run-macros?observation_workout_id={workout_id}"
         headers = {"X-User-Id": self.user_id}
 
         async with ServiceClient(timeout=6.0) as client:
             resp = await client.post(url, headers=headers, expected_status=200, applied_plan_id=applied_plan_id)
         if not resp.success:
-            return None
+            return {
+                "applied_plan_id": applied_plan_id,
+                "error": "Не удалось построить предпросмотр",
+                "observation_workout_id": workout_id,
+            }
 
         data = resp.data or {}
         preview = data.get("preview") or []
@@ -494,10 +542,11 @@ class SessionService:
                 if ch.get("type") == "Inject_Mesocycle":
                     inject_count += 1
         has_patches = any(item.get("patches") for item in preview)
-        if inject_count == 0 and not has_patches:
+        if inject_count == 0 and not has_patches and not data.get("needs_weight_settings"):
             return None
         return {
             "applied_plan_id": applied_plan_id,
+            "macro_preview": data,
             "summary": {
                 "inject_mesocycles": inject_count,
                 "has_patches": bool(has_patches),

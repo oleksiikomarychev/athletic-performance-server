@@ -75,7 +75,7 @@ def select_checks(paths):
     for p in sorted(paths):
         if p in {".pre-commit-config.yaml", "scripts/check_changed.py"} or p.startswith("scripts/tests/"):
             selected.add("workflow")
-        elif p == "scripts/test_plan_contracts.py":
+        elif p in {"scripts/test_plan_contracts.py", "tests/integration/test_plan_operation_pipeline.py"}:
             selected.add("plan-contracts")
         elif p == "scripts/test_rpe_contracts.py":
             selected.add("rpe")
@@ -87,6 +87,7 @@ def select_checks(paths):
                 "plan-application",
                 "plan-schedule-changes",
                 "applied-plan-mass-edit",
+                "applied-plan-set-macros",
             )
         ):
             selected.add("plan-contracts")
@@ -94,6 +95,8 @@ def select_checks(paths):
             selected.add("workflow")
         elif p.endswith((".md", ".rst")):
             continue
+        elif p == "services/agent-service/agent_service/services/macros_manager.py":
+            selected.add("plan-contracts")
         elif p.startswith(("services/plans-service/", "services/workouts-service/")):
             selected.add("plan-contracts")
         elif p.startswith("services/exercises-service/"):

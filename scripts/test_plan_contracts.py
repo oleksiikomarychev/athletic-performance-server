@@ -95,6 +95,7 @@ def main():
                 [
                     "services/plans-service/tests/test_active_plan_guard_postgres.py",
                     "services/plans-service/tests/test_apply_plan_guard.py",
+                    "services/plans-service/tests/test_macro_set_calculation.py",
                     "services/plans-service/tests/test_calendar_plan_ownership.py",
                 ],
                 [

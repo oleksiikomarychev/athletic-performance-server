@@ -1,9 +1,10 @@
-from typing import Any
+from typing import Annotated, Any, Literal
+from uuid import UUID
 
 import structlog
 from backend_common.celery_utils import build_task_status_response, enqueue_task
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..celery_app import celery_app
@@ -15,8 +16,7 @@ from ..schemas.calendar_plan import (
 )
 from ..schemas.task_responses import TaskStatusResponse, TaskSubmissionResponse
 from ..services.applied_calendar_plan_service import AppliedCalendarPlanService
-from ..services.macro_apply import MacroApplier
-from ..services.macro_engine import MacroEngine
+from ..services.macro_apply import apply_macros, preview_macros
 from ..tasks.apply_plan_tasks import apply_plan_macros_task, apply_plan_task
 
 router = APIRouter(prefix="/applied-plans")
@@ -92,64 +92,39 @@ async def get_applied_plan_analytics(
         )
 
 
-@router.post("/{applied_plan_id}/apply-macros", response_model=dict[str, Any])
+class MacroConfirmation(BaseModel):
+    preview_id: UUID | None = None
+    mesocycles_only: bool = False
+
+
+@router.post("/{applied_plan_id}/apply-macros")
 async def apply_plan_macros(
     applied_plan_id: int,
-    index_offset: int = Query(0, description="Offset to apply to current_workout_index when evaluating macros"),
+    confirmation: MacroConfirmation | None = None,
+    index_offset: int = 0,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    try:
-        engine = MacroEngine(db, user_id)
-        preview = await engine.run_for_applied_plan(applied_plan_id, anchor="current", index_offset=index_offset)
-
-        svc = AppliedCalendarPlanService(db, user_id)
-        plan_changes_results: list[dict] = []
-        for item in preview.get("preview") or []:
-            for ch in item.get("plan_changes") or []:
-                if ch.get("type") == "Inject_Mesocycle":
-                    params = ch.get("params") or {}
-                    mode = str((params.get("mode") or "").strip())
-                    tpl_id = params.get("template_id")
-                    src_id = params.get("source_mesocycle_id") or params.get("mesocycle_id")
-                    placement = params.get("placement")
-                    try:
-                        res = await svc.inject_mesocycle_into_applied_plan(
-                            applied_plan_id,
-                            mode=mode,
-                            template_id=tpl_id if tpl_id is not None else None,
-                            source_mesocycle_id=src_id if src_id is not None else None,
-                            placement=placement if isinstance(placement, dict) else None,
-                        )
-                    except Exception:
-                        res = {"applied": False, "reason": "exception"}
-                    plan_changes_results.append(res)
-
-        applier = MacroApplier(user_id=user_id)
-        patch_result = await applier.apply(preview)
-        return {
-            "preview": preview,
-            "plan_changes": plan_changes_results,
-            "apply_result": patch_result,
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to apply macros: {str(e)}",
-        )
+    confirmation = confirmation or MacroConfirmation()
+    return await apply_macros(
+        db, user_id, applied_plan_id, confirmation.preview_id, index_offset, confirmation.mesocycles_only
+    )
 
 
 @router.post("/{applied_plan_id}/apply-macros-async", response_model=TaskSubmissionResponse)
 async def apply_plan_macros_async(
     applied_plan_id: int,
-    index_offset: int = Query(0, description="Offset to apply to current_workout_index when evaluating macros"),
+    confirmation: MacroConfirmation | None = None,
+    index_offset: int = 0,
     user_id: str = Depends(get_current_user_id),
 ):
+    confirmation = confirmation or MacroConfirmation()
     return _submit_task(
         apply_plan_macros_task,
         user_id=user_id,
         applied_plan_id=applied_plan_id,
         index_offset=index_offset,
+        **confirmation.model_dump(mode="json"),
     )
 
 
@@ -206,12 +181,15 @@ async def get_user_applied_plans(
 async def advance_applied_plan_index(
     applied_plan_id: int,
     by: int = Query(1, description="How many positions to advance the current_workout_index by"),
+    observation_workout_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
     try:
         svc = AppliedCalendarPlanService(db, user_id)
-        new_index = await svc.advance_current_index(applied_plan_id, by=by)
+        new_index = await svc.advance_current_index(
+            applied_plan_id, by=by, observation_workout_id=observation_workout_id
+        )
         if new_index is None:
             raise HTTPException(status_code=404, detail="Applied plan not found")
         return {"applied_plan_id": applied_plan_id, "current_workout_index": new_index}
@@ -367,22 +345,27 @@ async def apply_plan_async(
     )
 
 
+class LegacyWeightSettings(BaseModel):
+    effective_maxima: dict[str, Annotated[float, Field(gt=0, allow_inf_nan=False)]]
+    rounding_step: float = Field(ge=0, allow_inf_nan=False)
+    rounding_mode: Literal["nearest", "floor", "ceil"]
+
+
+class MacroPreviewRequest(BaseModel):
+    legacy_weights: LegacyWeightSettings | None = None
+
+
 @router.post("/{applied_plan_id}/run-macros", response_model=dict[str, Any])
 async def run_plan_macros(
     applied_plan_id: int,
-    index_offset: int = Query(1, description="Offset to apply to current_workout_index when evaluating macros"),
+    index_offset: int = Query(0),
+    observation_workout_id: int | None = Query(None),
+    request: MacroPreviewRequest | None = None,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    try:
-        engine = MacroEngine(db, user_id)
-        result = await engine.run_for_applied_plan(applied_plan_id, anchor="current", index_offset=index_offset)
-        return result
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to run macros: {str(e)}",
-        )
+    weights = request.legacy_weights.model_dump() if request and request.legacy_weights else None
+    return await preview_macros(db, user_id, applied_plan_id, index_offset, observation_workout_id, weights)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)

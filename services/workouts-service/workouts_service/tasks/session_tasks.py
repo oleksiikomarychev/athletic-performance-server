@@ -80,13 +80,21 @@ async def _finish_session_postprocess_async(session_id: int, user_id: str) -> di
         suggestion: dict[str, Any] | None = None
         if applied_plan_id:
             try:
-                suggestion = await service._compute_macro_suggestion(applied_plan_id)
+                stored = session.macro_suggestion
+                suggestion = (
+                    stored
+                    if stored and not stored.get("error")
+                    else await service._compute_macro_suggestion(applied_plan_id, workout_id)
+                )
                 session.macro_suggestion = suggestion
                 await db.commit()
                 await db.refresh(session)
                 try:
                     base_url = (os.getenv("PLANS_SERVICE_URL") or "http://plans-service:8005").rstrip("/")
-                    adv_url = f"{base_url}/plans/applied-plans/{applied_plan_id}/advance-index?by=1"
+                    adv_url = (
+                        f"{base_url}/plans/applied-plans/{applied_plan_id}/advance-index"
+                        f"?by=1&observation_workout_id={workout_id}"
+                    )
                     headers = {"X-User-Id": user_id}
                     async with httpx.AsyncClient(timeout=4.0) as client:
                         resp = await client.post(adv_url, headers=headers)

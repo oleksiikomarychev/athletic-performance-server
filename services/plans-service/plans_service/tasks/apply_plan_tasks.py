@@ -12,8 +12,7 @@ from ..celery_app import PLANS_TASK_QUEUE
 from ..database import DATABASE_URL
 from ..schemas.calendar_plan import ApplyPlanComputeSettings
 from ..services.applied_calendar_plan_service import AppliedCalendarPlanService
-from ..services.macro_apply import MacroApplier
-from ..services.macro_engine import MacroEngine
+from ..services.macro_apply import apply_macros
 
 logger = get_task_logger(__name__)
 
@@ -104,6 +103,8 @@ async def _apply_macros_async(
     applied_plan_id: int,
     user_id: str,
     index_offset: int,
+    preview_id: str | None = None,
+    mesocycles_only: bool = False,
 ) -> dict[str, Any]:
     from backend_common.database import create_async_engine_and_session
 
@@ -117,42 +118,7 @@ async def _apply_macros_async(
 
     try:
         async with TaskAsyncSessionLocal() as session:
-            engine = MacroEngine(session, user_id)
-            preview = await engine.run_for_applied_plan(
-                applied_plan_id,
-                anchor="current",
-                index_offset=index_offset,
-            )
-
-            svc = AppliedCalendarPlanService(session, user_id)
-            plan_changes_results: list[dict[str, Any]] = []
-            for item in preview.get("preview") or []:
-                for ch in item.get("plan_changes") or []:
-                    if ch.get("type") == "Inject_Mesocycle":
-                        params = ch.get("params") or {}
-                        mode = str((params.get("mode") or "").strip())
-                        tpl_id = params.get("template_id")
-                        src_id = params.get("source_mesocycle_id") or params.get("mesocycle_id")
-                        placement = params.get("placement")
-                        try:
-                            res = await svc.inject_mesocycle_into_applied_plan(
-                                applied_plan_id,
-                                mode=mode,
-                                template_id=tpl_id if tpl_id is not None else None,
-                                source_mesocycle_id=src_id if src_id is not None else None,
-                                placement=placement if isinstance(placement, dict) else None,
-                            )
-                        except Exception:
-                            res = {"applied": False, "reason": "exception"}
-                        plan_changes_results.append(res)
-
-            applier = MacroApplier(user_id=user_id)
-            patch_result = await applier.apply(preview)
-            return {
-                "preview": preview,
-                "plan_changes": plan_changes_results,
-                "apply_result": patch_result,
-            }
+            return await apply_macros(session, user_id, applied_plan_id, preview_id, index_offset, mesocycles_only)
     finally:
         await task_engine.dispose()
 
@@ -209,6 +175,8 @@ def apply_plan_macros_task(
     applied_plan_id: int,
     user_id: str,
     index_offset: int,
+    preview_id: str | None = None,
+    mesocycles_only: bool = False,
 ) -> dict[str, Any]:
     try:
         return _run_async(
@@ -216,8 +184,14 @@ def apply_plan_macros_task(
                 applied_plan_id=applied_plan_id,
                 user_id=user_id,
                 index_offset=index_offset,
+                preview_id=preview_id,
+                mesocycles_only=mesocycles_only,
             )
         )
+    except HTTPException as exc:
+        if exc.status_code < 500 or not preview_id:
+            raise ValueError(exc.detail) from exc
+        raise self.retry(exc=exc, countdown=60)
     except Exception as exc:
         logger.exception("apply_plan_macros_task_failed", exc_info=exc)
         raise self.retry(exc=exc, countdown=60)

@@ -498,7 +498,7 @@ class WorkoutService:
                         )
                         need_weight = bool(getattr(request, "compute_weights", False)) and (working_weight is None)
 
-                        if self.rpe_rpc and (need_core_fill or need_weight):
+                        if self.rpe_rpc and not set_data.subsets and (need_core_fill or need_weight):
                             try:
                                 um = user_max_by_ex.get(int(exercise.exercise_id))
                                 user_max_id = int(um.get("id")) if um and um.get("id") is not None else None
@@ -529,6 +529,9 @@ class WorkoutService:
 
                         workout_set = models.WorkoutSet(
                             exercise_id=workout_exercise.id,
+                            order_index=set_idx,
+                            set_type=set_data.set_type,
+                            subsets=set_data.subsets,
                             intensity=intensity,
                             effort=effort,
                             volume=volume,

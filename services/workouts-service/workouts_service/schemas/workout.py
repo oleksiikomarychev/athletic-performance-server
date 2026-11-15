@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class WorkoutTypeEnum(str, Enum):
@@ -53,7 +53,9 @@ class WorkoutSetResponse(BaseModel):
 
 class WorkoutExerciseResponse(BaseModel):
     id: int
-    exercise_id: int = Field(serialization_alias="exercise_list_id")
+    exercise_id: int = Field(
+        validation_alias=AliasChoices("exercise_id", "exercise_list_id"), serialization_alias="exercise_list_id"
+    )
     order: int | None = Field(default=None, serialization_alias="order")
     notes: str | None = None
     rest_seconds: int | None = Field(default=None, ge=0)

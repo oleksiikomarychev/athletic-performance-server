@@ -106,3 +106,22 @@ class WorkoutSession(Base):
 
     def __repr__(self) -> str:
         return f"<WorkoutSession(id={self.id}, workout_id={self.workout_id}, status={self.status})>"
+
+
+class MacroPreview(Base):
+    __tablename__ = "macro_previews"
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(String(255), nullable=False)
+    plan_id = Column(Integer, nullable=False)
+    effects = Column(JSON, nullable=False)
+    result = Column(JSON, nullable=True)
+
+
+class MacroExecution(Base):
+    __tablename__ = "macro_executions"
+
+    user_id = Column(String(255), primary_key=True)
+    plan_id = Column(Integer, primary_key=True)
+    workout_id = Column(Integer, primary_key=True)
+    rule_key = Column(String(128), primary_key=True)

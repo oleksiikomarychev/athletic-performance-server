@@ -10,6 +10,8 @@ class WorkoutSet(BaseModel):
 
 
 class ExerciseSet(BaseModel):
+    set_type: str | None = None
+    subsets: list[dict] | None = None
     exercise_id: int
     intensity: float | None = None
     effort: float | None = None

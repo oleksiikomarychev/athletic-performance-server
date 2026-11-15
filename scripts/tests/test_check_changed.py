@@ -38,7 +38,12 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(unknown, [])
 
     def test_known_plan_consumer_and_spec(self):
-        for p in ("gateway/gateway_app/routes/plans.py", "openspec/specs/plan-application/spec.md"):
+        for p in (
+            "gateway/gateway_app/routes/plans.py",
+            "openspec/specs/plan-application/spec.md",
+            "tests/integration/test_plan_operation_pipeline.py",
+            "services/agent-service/agent_service/services/macros_manager.py",
+        ):
             with self.subTest(p=p):
                 self.assertEqual(gate.select_checks({p}), (["plan-contracts"], []))
 

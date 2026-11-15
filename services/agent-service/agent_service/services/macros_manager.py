@@ -1,4 +1,5 @@
 import json
+from string import Template
 from typing import Any
 
 import httpx
@@ -41,8 +42,8 @@ A MacroRule consists of: Trigger, Condition, Action, Duration.
     **3. Action** (What to do?)
     - `type` (enum): "Adjust_Load", "Adjust_Sets", "Adjust_Reps"
     - `params` (dict):
-      - For `Adjust_Load`: { "mode": "by_Percent", "value": 1.05 }
-        (means +5% load). Use < 1.0 for decrease.
+      - For `Adjust_Load`: { "mode": "by_Percent", "value": 5 }
+        (means +5% load). Use negative percentages for a decrease.
       - For `Adjust_Sets`: { "mode": "by_Value", "value": 1 }
         (means +1 set). Use negative for decrease.
       - For `Adjust_Reps`: { "mode": "by_Value", "value": -2 }
@@ -56,7 +57,7 @@ A MacroRule consists of: Trigger, Condition, Action, Duration.
     - `count` (int): Number of future workouts to affect.
 
 ### EXERCISE MAP (Name -> ID)
-{exercise_map_json}
+$exercise_map_json
 
     ### INSTRUCTIONS
     1. Analyze the USER REQUEST.
@@ -76,7 +77,7 @@ JSON:
   "rule": {
     "trigger": { "metric": "Readiness_Score" },
     "condition": { "op": "<", "value": 4 },
-    "action": { "type": "Adjust_Load", "params": { "mode": "by_Percent", "value": 0.90 } },
+    "action": { "type": "Adjust_Load", "params": { "mode": "by_Percent", "value": -10 } },
     "duration": { "scope": "Next_N_Workouts", "count": 2 }
   }
 }
@@ -86,8 +87,8 @@ JSON:
 {
   "name": "Bench Press Stagnation Breaker",
   "rule": {
-    "trigger": { "metric": "e1RM", "exercise_ids": [101] },  // Assuming 101 is Bench Press
-    "condition": { "op": "stagnates_for", "n": 3, "epsilon_percent": 0.01 },
+    "trigger": { "metric": "Performance_Trend", "exercise_ids": [101] },  // Assuming 101 is Bench Press
+    "condition": { "op": "stagnates_for", "n": 3, "epsilon_percent": 1 },
     "action": {
       "type": "Adjust_Sets",
       "params": { "mode": "by_Value", "value": 1 },
@@ -98,14 +99,14 @@ JSON:
 }
 
 ### CURRENT REQUEST
-User: "{user_request}"
+User: "$user_request"
 """
 
 
 async def generate_macro_payload(user_request: str, exercise_map: dict[str, int]) -> dict[str, Any]:
     map_str = json.dumps(exercise_map, indent=None)
 
-    prompt = MACRO_GENERATION_PROMPT.format(exercise_map_json=map_str, user_request=user_request)
+    prompt = Template(MACRO_GENERATION_PROMPT).substitute(exercise_map_json=map_str, user_request=user_request)
 
     response_schema = {
         "type": "object",

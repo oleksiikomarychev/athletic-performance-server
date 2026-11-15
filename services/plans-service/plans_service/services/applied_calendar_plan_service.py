@@ -214,6 +214,17 @@ class AppliedCalendarPlanService:
             "by_target_muscle": {k: set(v) for k, v in by_target.items()},
         }
 
+    @staticmethod
+    def _macro_weight_settings(exercises, maxima, compute):
+        exercise_ids = {ex["exercise_id"] for ex in exercises}
+        return {
+            "effective_maxima": {
+                str(eid): maxima[eid] for eid in exercise_ids if compute.compute_weights and eid in maxima
+            },
+            "rounding_step": compute.rounding_step,
+            "rounding_mode": compute.rounding_mode.value,
+        }
+
     async def _generate_workouts_via_rpc(
         self, applied_plan_id: int, workouts: list[dict[str, Any]], compute: ApplyPlanComputeSettings
     ) -> list[int] | None:
@@ -467,6 +478,7 @@ class AppliedCalendarPlanService:
                 base_true = await workout_calculation.WorkoutCalculator.get_true_1rm_from_user_max(um, headers=headers)
                 effective_1rms[um["exercise_id"]] = float(base_true if base_true is not None else um["max_weight"])
 
+            workout_weight_settings = []
             logger.info(
                 "effective_1rms_initialized",
                 user_maxes_count=len(user_maxes),
@@ -476,7 +488,6 @@ class AppliedCalendarPlanService:
             )
 
             workouts_to_generate: list[dict[str, Any]] = []
-            workouts_instances_to_generate: list[dict[str, Any]] = []
             for mi, meso in enumerate(mesocycles, start=1):
                 for mci, mc in enumerate(meso_id_to_micro.get(meso.id, []), start=1):
                     schedule_dict: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -556,7 +567,6 @@ class AppliedCalendarPlanService:
 
                         for workout_index, workout_payload in enumerate(workouts_for_day, start=1):
                             workout_exercises: list[dict[str, Any]] = []
-                            workout_exercises_instances: list[dict[str, Any]] = []
 
                             # Process exercises in parallel
                             async def process_exercise(
@@ -676,48 +686,30 @@ class AppliedCalendarPlanService:
                                             if not isinstance(sub, dict):
                                                 continue
                                             i0 = sub.get("intensity")
-                                            e0 = sub.get("effort")
-                                            v0 = sub.get("volume")
+                                            e0 = sub.get("effort", sub.get("rpe"))
+                                            v0 = sub.get("volume", sub.get("reps"))
                                             intensity, effort, volume, weight = await _compute_one(
                                                 intensity=i0,
                                                 effort=e0,
                                                 volume=v0,
                                             )
+                                            calculated = {
+                                                "intensity": intensity,
+                                                "effort": effort,
+                                                "volume": volume,
+                                                "working_weight": weight,
+                                            }
+                                            calculated_sets.append(calculated)
                                             computed_subsets.append(
                                                 {
-                                                    "intensity": intensity,
-                                                    "effort": effort,
-                                                    "volume": volume,
-                                                    "working_weight": weight,
+                                                    **sub,
+                                                    **calculated,
+                                                    "reps": volume,
                                                     "weight": weight,
+                                                    "rpe": effort,
                                                 }
                                             )
-                                            calculated_sets.append(
-                                                {
-                                                    "intensity": intensity,
-                                                    "effort": effort,
-                                                    "volume": volume,
-                                                    "working_weight": weight,
-                                                }
-                                            )
-
-                                        instance_sets.append(
-                                            {
-                                                "set_type": set_type,
-                                                "subsets": [
-                                                    {
-                                                        "reps": cs.get("volume"),
-                                                        "weight": cs.get("working_weight"),
-                                                        "rpe": cs.get("effort"),
-                                                        "effort": cs.get("effort"),
-                                                        "effort_type": "RPE",
-                                                        "intensity": cs.get("intensity"),
-                                                        "volume": cs.get("volume"),
-                                                    }
-                                                    for cs in computed_subsets
-                                                ],
-                                            }
-                                        )
+                                        instance_sets.append({"set_type": set_type, "subsets": computed_subsets})
                                     else:
                                         intensity, effort, volume, weight = await _compute_one(
                                             intensity=set_data.get("intensity"),
@@ -734,39 +726,17 @@ class AppliedCalendarPlanService:
                                         )
                                         instance_sets.append(
                                             {
+                                                **calculated_sets[-1],
                                                 "set_type": set_type if set_type != "normal" else None,
-                                                "reps": volume,
-                                                "weight": weight,
-                                                "rpe": effort,
-                                                "effort": effort,
-                                                "effort_type": "RPE",
-                                                "intensity": intensity,
-                                                "volume": volume,
                                             }
                                         )
 
-                                calculated_result = {
-                                    "exercise_id": exercise["exercise_id"],
-                                    "sets": calculated_sets,
-                                }
+                                calculated_result = {"exercise_id": exercise["exercise_id"], "sets": calculated_sets}
                                 workout_exercise_result = {
                                     "exercise_id": exercise["exercise_id"],
-                                    "sets": [
-                                        {
-                                            "exercise_id": exercise["exercise_id"],
-                                            "intensity": s["intensity"],
-                                            "effort": s["effort"],
-                                            "volume": s["volume"],
-                                            "working_weight": s["working_weight"],
-                                        }
-                                        for s in calculated_sets
-                                    ],
+                                    "sets": [dict(s, exercise_id=exercise["exercise_id"]) for s in instance_sets],
                                 }
-                                instance_result = {
-                                    "exercise_id": exercise["exercise_id"],
-                                    "instance_sets": instance_sets,
-                                }
-                                return calculated_result, workout_exercise_result, instance_result
+                                return calculated_result, workout_exercise_result
 
                             # Process all exercises in parallel
                             exercise_tasks = [process_exercise(ex) for ex in workout_payload.get("exercises", [])]
@@ -783,10 +753,9 @@ class AppliedCalendarPlanService:
                                     )
                                     continue
 
-                                calculated_result, workout_exercise_result, instance_result = result
+                                calculated_result, workout_exercise_result = result
                                 calculated_schedule[label].append(calculated_result)
                                 workout_exercises.append(workout_exercise_result)
-                                workout_exercises_instances.append(instance_result)
 
                             workout_name = f"{label} - Workout {workout_index}"
                             workouts_to_generate.append(
@@ -801,10 +770,8 @@ class AppliedCalendarPlanService:
                                 }
                             )
 
-                            workouts_instances_to_generate.append(
-                                {
-                                    "exercises": workout_exercises_instances,
-                                }
+                            workout_weight_settings.append(
+                                self._macro_weight_settings(workout_exercises, effective_1rms, compute)
                             )
                             plan_order += 1
                             current_day_offset += 1
@@ -877,6 +844,7 @@ class AppliedCalendarPlanService:
                                 workout_id=workout_id,
                                 order_index=start + i,
                                 nutrition_plan=chunk[i].get("nutrition_plan"),
+                                macro_weight_settings=workout_weight_settings[start + i],
                             )
                             self.db.add(applied_workout)
                         await self.db.flush()
@@ -1165,7 +1133,9 @@ class AppliedCalendarPlanService:
         result = await self.db.execute(stmt)
         return result.scalars().first()
 
-    async def advance_current_index(self, applied_plan_id: int, by: int = 1) -> int | None:
+    async def advance_current_index(
+        self, applied_plan_id: int, by: int = 1, observation_workout_id: int | None = None
+    ) -> int | None:
         try:
             user_id = self._require_user_id()
             stmt = (
@@ -1175,12 +1145,20 @@ class AppliedCalendarPlanService:
                     AppliedCalendarPlan.id == applied_plan_id,
                     AppliedCalendarPlan.user_id == user_id,
                 )
+                .with_for_update()
             )
             res = await self.db.execute(stmt)
             plan = res.scalars().first()
             if not plan:
                 return None
             current = int(getattr(plan, "current_workout_index", 0) or 0)
+            if observation_workout_id is not None:
+                observed = next((w for w in plan.workouts if w.workout_id == observation_workout_id), None)
+                if observed is None:
+                    return None
+                if observed.session_advanced:
+                    return current
+                observed.session_advanced = True
             try:
                 step = int(by)
             except (TypeError, ValueError):
@@ -1517,6 +1495,7 @@ class AppliedCalendarPlanService:
                 workouts_to_generate_count=len(workouts_to_generate),
                 has_compute_variable="compute" in locals(),
             )
+            effective_1rms = {}
             if compute.compute_weights:
                 logger.info(
                     "template_weight_calculation_start",
@@ -1573,7 +1552,6 @@ class AppliedCalendarPlanService:
                         if exid not in user_max_by_ex:
                             user_max_by_ex[exid] = um
 
-                effective_1rms: dict[int, float] = {}
                 for exid, um in user_max_by_ex.items():
                     try:
                         true_1rm = await workout_calculation.WorkoutCalculator.get_true_1rm_from_user_max(
@@ -1717,6 +1695,9 @@ class AppliedCalendarPlanService:
                     applied_plan_id=plan.id,
                     workout_id=wid,
                     order_index=insert_pos + i,
+                    macro_weight_settings=self._macro_weight_settings(
+                        workouts_to_generate[i]["exercises"], effective_1rms, compute
+                    ),
                 )
                 self.db.add(apw)
                 aw = AppliedWorkout(
